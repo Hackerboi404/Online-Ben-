@@ -1,16 +1,45 @@
 from flask import Flask
+import threading
 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+# ===== CONFIG =====
+BOT_TOKEN = "8345687203:AAEloDRtx3ymHyuKDXbkUfjpnKvisTTbrMQ"
+WEB_URL = "https://ben-tennyson.onrender.com"
+
+# ===== FLASK APP =====
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return """
-    <h1>🔥 Live Stream</h1>
-    <p>Yaha tera stream chalega</p>
-    <video width="400" controls autoplay>
-        <source src="https://example.com/video.mp4" type="video/mp4">
-    </video>
-    """
+    return "<h1>🔥 Stream is Live</h1>"
 
+# ===== TELEGRAM BOT =====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Bot is alive & working!")
+
+async def stream(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🎬 Open Stream", url=WEB_URL)]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Click below to watch stream 👇",
+        reply_markup=reply_markup
+    )
+
+def run_bot():
+    app_bot = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("stream", stream))
+
+    print("🤖 Bot started...")
+    app_bot.run_polling()
+
+# ===== RUN BOTH =====
 if __name__ == "__main__":
+    threading.Thread(target=run_bot).start()
     app.run(host="0.0.0.0", port=10000)
