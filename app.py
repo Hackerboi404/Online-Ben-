@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 # Get these from environment variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8668325692:AAGY-CvHtTvGL2Yxshv9saceffsiVDdulzY")
-ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "123456789").split(",")))
+ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "8739215730").split(",")))
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DB_NAME = "guardian_bot.db"
