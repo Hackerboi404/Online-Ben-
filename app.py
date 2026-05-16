@@ -6,21 +6,21 @@ import requests
 import re
 from datetime import datetime
 from flask import Flask, jsonify
+from unidecode import unidecode  # <--- ADDED FOR FONT NORMALIZATION
 
 # ==========================================
 # ⚙️ CONFIGURATION & CONSTANTS
 # ==========================================
 app = Flask(__name__)
 
-# Get these from environment variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8668325692:AAGY-CvHtTvGL2Yxshv9saceffsiVDdulzY")
-ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "8739215730").split(",")))
+ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "123456789").split(",")))
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 DB_NAME = "guardian_bot.db"
 
 # ==========================================
-# 💾 DATABASE SYSTEM (SQLite)
+# 💾 DATABASE SYSTEM
 # ==========================================
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
@@ -42,7 +42,7 @@ def db_execute(query, params=(), fetch=False):
         cursor.execute(query, params)
         conn.commit()
         if fetch: return cursor.fetchall()
-        return None
+    return None
 
 def is_blacklisted(user_id):
     res = db_execute("SELECT blacklisted FROM users WHERE user_id = ?", (user_id,), fetch=True)
@@ -74,65 +74,144 @@ def set_setting(key, value):
 init_db()
 
 # ==========================================
-# 🧠 DETECTION ENGINE (UPDATED KEYWORDS)
+# 🧠 ADVANCED DETECTION ENGINE (NORMALIZED)
 # ==========================================
+
+def normalize_text(text):
+    """
+    𝗙𝗥𝗘𝗘 𝗦𝗛𝗢𝗪 -> free show
+    """
+    if not text: return ""
+    # Convert unicode to ascii
+    normalized = unidecode(text)
+    # Remove invisible chars
+    normalized = re.sub(r'[\u200b-\u200d\u2060-\u206f\ufeff]', '', normalized)
+    return normalized.lower()
+
+# Keywords for Bio Scan
+BIO_SUSPICIOUS_WORDS = [
+    "join", "come", "dm", "msg", "service", "available", "show", 
+    "paid", "vc", "video call", "inbox", "free show", "adult", 
+    "bull", "couple", "fun", "night", "hookup", "sex", "porn", "tamil"
+]
+
+ADULT_BAIT_KEYWORDS = [
+    "free show", "show ho rahi", "bio me aajao", "dekh lo", 
+    "mast hai", "full fun", "video", "live", "cam", "nude", "xxx", "8inc"
+]
+
 SCAM_KEYWORDS = [
-    # Money & Investment
     "earn", "income", "profit", "investment", "crypto", "bitcoin", "trading", 
     "forex", "binary", "betting", "casino", "loan", "spam", "click here", 
     "join now", "daily income", "guaranteed", "work from home", "make money",
     "paisa", "kamaye", "rozana", "rupay", 
     "ربح", "استثمار", 
     "பணம்", "வருமானம்",
-    # Job / Paid Spam
     "job", "internship", "salary", "part time", "work from home", "earn daily",
     "paid", "paid promotion", "paid service", "paid ugc", "paid promo",
     "job alert", "hiring", "vacancy", "recruitment"
 ]
 
-# 🚫 ADULT / PAID SERVICE / BAD WORDS FILTER
 BAD_CONTENT_KEYWORDS = [
-    # Adult / Paid Services
     "sex", "porn", "xxx", "nude", "naked", "nsfw", "hentai", "onlyfans",
     "call girl", "callgirl", "escort", "massage", "night service", "dating",
     "service available", "full night", "fun available", "enjoy", "hookup",
-    
-    # Specific Requests (like 8inc)
-    "8inc", "dick pic", "cock", "pussy", "boobs", "ass", "fuck", 
+    "dick pic", "cock", "pussy", "boobs", "ass", "fuck", 
     "chut", "lund", "gand", "muth", "madarchod", "behenchod", "randi",
-    
-    # Inappropriate / Abuse
     "rape", "kill", "death", "suicide", "bomb", "terrorist"
 ]
 
-def calculate_score(text):
-    if not text: return 0
-    text_lower = text.lower()
-    score = 0
+def get_user_profile(user_id):
+    try:
+        resp = requests.get(f"{API_URL}/getChat", params={"chat_id": user_id})
+        if resp.json().get("ok"):
+            return resp.json().get("result", {})
+    except:
+        pass
+    return {}
 
-    # 1. Scam / Money / Job Keywords (+5)
+def calculate_total_risk(user_obj, message_text):
+    """
+    Combines Old Logic + New Bio/Font Logic
+    """
+    # --- 1. PROFILE & FONT CHECK ---
+    username = user_obj.get("username", "")
+    first_name = user_obj.get("first_name", "")
+    last_name = user_obj.get("last_name", "")
+    
+    full_raw_name = f"{first_name} {last_name} {username}"
+    norm_name = normalize_text(full_raw_name)
+    
+    risk_score = 0
+    risk_reasons = []
+
+    # Check Stylish Fonts in Name
+    if len(full_raw_name) > len(norm_name) + 2:
+        risk_score += 4
+        risk_reasons.append("Stylish Font in Name")
+
+    # Fetch Bio
+    profile = get_user_profile(user_obj["id"])
+    bio_raw = profile.get("bio", "")
+    norm_bio = normalize_text(bio_raw)
+
+    # --- 2. BIO SCAN ---
+    # A. Private Group Links in Bio (INSTANT BAN)
+    if re.search(r't\.me/\+|t\.me/joinchat|private group', norm_bio):
+        risk_score += 10
+        risk_reasons.append("Private Group Link in Bio")
+
+    # B. Suspicious Words in Bio
+    for word in BIO_SUSPICIOUS_WORDS:
+        if word in norm_bio:
+            risk_score += 6
+            risk_reasons.append(f"Bio Word: {word}")
+            break
+
+    # --- 3. MESSAGE SCAN (Using OLD Logic + Normalization) ---
+    norm_msg = normalize_text(message_text)
+    text_lower = norm_msg # Reuse variable for compatibility with old logic below
+
+    # OLD: Scam / Money / Job Keywords (+5)
     for kw in SCAM_KEYWORDS:
         if kw in text_lower:
-            score += 5
+            risk_score += 5
+            risk_reasons.append(f"Scam Word: {kw}")
             break 
 
-    # 2. ADULT / BAD WORDS / PAID SERVICES (+8)
+    # OLD: ADULT / BAD WORDS / PAID SERVICES (+8)
     for kw in BAD_CONTENT_KEYWORDS:
         if kw in text_lower:
-            score += 8
+            risk_score += 8
+            risk_reasons.append(f"Bad Word: {kw}")
             break 
 
-    # 3. Group Invite Link (+10)
-    if re.search(r't\.me/\+|t\.me/joinchat', text):
-        score += 10
+    # NEW: Adult Bait Phrases (+7)
+    for kw in ADULT_BAIT_KEYWORDS:
+        if kw in text_lower:
+            risk_score += 7
+            risk_reasons.append(f"Adult Bait: {kw}")
+            break
 
-    # 4. Emoji Spam / Distortion (+3)
-    if len(re.findall(r'[^\w\s]', text)) > 10: 
-        score += 3
-    if re.search(r'(.)\1{4,}', text): 
-        score += 3
+    # OLD: Group Invite Link (+10)
+    if re.search(r't\.me/\+|t\.me/joinchat', text_lower):
+        risk_score += 10
+        risk_reasons.append("Group Link in Msg")
 
-    return score
+    # OLD: Emoji Spam / Distortion (+3)
+    if len(re.findall(r'[^\w\s]', message_text)) > 10: 
+        risk_score += 3
+    if re.search(r'(.)\1{4,}', message_text): 
+        risk_score += 3
+        
+    # NEW: Font Spam in Message
+    if len(message_text) > 0:
+        non_ascii = sum(1 for c in message_text if ord(c) > 127)
+        if non_ascii > len(message_text) * 0.5:
+            risk_score += 4
+            risk_reasons.append("Heavy Font Spam in Msg")
+
+    return risk_score, ", ".join(risk_reasons)
 
 def send_log(user_id, group_id, msg_text, reason, action):
     save_log(user_id, group_id, msg_text, f"{action} | {reason}")
@@ -166,7 +245,7 @@ def telegram_request(method, data):
 offset = 0
 def run_bot():
     global offset
-    print("🤖 Guardian Bot Started...")
+    print("🤖 Guardian Bot V3 (Bio + Font Filter) Started...")
     
     while True:
         try:
@@ -180,18 +259,29 @@ def run_bot():
             for update in data["result"]:
                 offset = update["update_id"] + 1
                 
-                # Handle Group Join (Auto-Ban Blacklisters, No Welcome Msg)
+                # Handle Group Join (Auto-Ban Check + Bio Check)
                 if "new_chat_members" in update.get("message", {}):
                     message = update["message"]
                     chat = message["chat"]
                     user = message["new_chat_members"][0] 
                     chat_id = chat["id"]
                     user_id = user["id"]
+                    username = user.get("username", "Unknown")
                     
-                    # If blacklisted, ban them immediately
+                    # 1. Check DB Blacklist
                     if is_blacklisted(user_id):
                         telegram_request("banChatMember", {"chat_id": chat_id, "user_id": user_id})
                         send_log(user_id, chat_id, "User Joined", "Auto-Banned (Blacklisted)", "Banned")
+                        continue
+                    
+                    # 2. UPDATED: Full Bio Scan on Join
+                    score, reasons = calculate_total_risk(user, "")
+                    
+                    if score >= 10:
+                        telegram_request("banChatMember", {"chat_id": chat_id, "user_id": user_id})
+                        add_blacklist(user_id, username, f"Join Scan: {reasons} (Score {score})")
+                        send_log(user_id, chat_id, "Bio/Profile Check", f"Auto-Banned: {reasons}", "Banned")
+                    
                     continue
 
                 message = update.get("message")
@@ -208,52 +298,49 @@ def run_bot():
                 chat_type = chat.get("type", "private")
                 is_admin = user_id in ADMIN_IDS
 
-                # --- DM COMMAND: /start (Neon Welcome) ---
+                # --- DM COMMAND: /start ---
                 if chat_type == "private" and text == "/start":
                     first_name = user.get("first_name", "Friend")
-                    
-                    # Neon Style Welcome Message
                     welcome_msg = (
                         f"💠 𝗪𝗲𝗹𝗰𝗼𝗺𝗲 𝘁𝗼 𝗚𝘂𝗮𝗿𝗱𝗶𝗮𝗻 𝗙𝗶𝗹𝘁𝗲𝗿, {first_name}! 💠\n\n"
                         f"🛡️ 𝗔𝗱𝘃𝗮𝗻𝗰𝗲𝗱 𝗦𝗽𝗮𝗺 𝗣𝗿𝗼𝘁𝗲𝗰𝘁𝗶𝗼𝗻\n"
                         f"⚡ 𝗠𝘂𝗹𝘁𝗶-𝗹𝗶𝗻𝗴𝘂𝗮𝗹 𝗔𝗜 𝗗𝗲𝘁𝗲𝗰𝘁𝗶𝗼𝗻\n"
                         f"🚫 𝗔𝘂𝘁𝗼-𝗕𝗹𝗮𝗰𝗸𝗹𝗶𝘀𝘁 𝗦𝘆𝘀𝘁𝗲𝗺\n"
-                        f"📊 𝗥𝗲𝗮𝗹-𝘁𝗶𝗺𝗲 𝗟𝗼𝗴𝗴𝗶𝗻𝗴\n\n"
+                        f"📊 𝗥𝗲𝗮𝗹-𝘁𝗶𝗰𝗮𝗹-𝘁𝗶𝗺𝗲 𝗟𝗼𝗴𝗴𝗶𝗻𝗴\n\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"✨ 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:\n"
                         f"• 𝗦𝗰𝗮𝗺 & 𝗖𝗿𝘆𝗽𝘁𝗼 𝗙𝗶𝗹𝘁𝗲𝗿\n"
-                        f"• 𝗔𝗱𝘂𝗹𝘁 & 𝗕𝗮𝗱 𝗪𝗼𝗿𝗱 𝗙𝗶𝗹𝘁𝗲𝗿\n"
+                        f"• 𝗔𝗱𝘂𝗹𝗰𝘁 & 𝗕𝗮𝗱 𝗪𝗼𝗿𝗱 𝗙𝗶𝗹𝘁𝗲𝗿\n"
                         f"• 𝗣𝗮𝗶𝗱 𝗦𝗲𝗿𝘃𝗶𝗰𝗲 𝗕𝗹𝗼𝗰𝗸𝗲𝗿\n"
                         f"• 𝗝𝗼𝗯/𝗦𝗽𝗮𝗺 𝗗𝗲𝘁𝗲𝗰𝘁𝗼𝗿\n"
+                        f"• 𝗕𝗶𝗼 𝗟𝗶𝗻𝗸 𝗙𝗶𝗹𝘁𝗲𝗿\n"
+                        f"• 𝗦𝘁𝘆𝗹𝗶𝘀𝗵 𝗙𝗼𝗻𝘁 𝗕𝗹𝗼𝗰𝗸𝗲𝗿\n"
                         f"━━━━━━━━━━━━━━━\n"
                         f"🤖 𝗔𝗱𝗱 𝗺𝗲 𝘁𝗼 𝘆𝗼𝘂𝗿 𝗴𝗿𝗼𝘂𝗽 𝘁𝗼 𝗴𝗲𝘁 𝘀𝘁𝗮𝗿𝘁𝗲𝗱!"
                     )
-                    
-                    telegram_request("sendMessage", {
-                        "chat_id": chat_id, 
-                        "text": welcome_msg
-                    })
+                    telegram_request("sendMessage", {"chat_id": chat_id, "text": welcome_msg})
                     continue
 
                 # --- ADMIN COMMANDS ---
-                if is_admin and text.startswith("/"):
-                    if text == "/blacklist list":
-                        blist = get_blacklist()
-                        reply = "🚫 **Blacklist:**\n" + "\n".join([f"• `{u[0]}` ({u[1]})" for u in blist])
-                        telegram_request("sendMessage", {"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
-                    elif text.startswith("/unblacklist"):
-                        try:
-                            target_id = int(text.split(" ")[1])
-                            remove_blacklist(target_id)
-                            telegram_request("sendMessage", {"chat_id": chat_id, "text": f"✅ Unblacklisted {target_id}"})
-                        except: pass
-                    elif text.startswith("/log set"):
-                        set_setting("log_channel", str(chat_id))
-                        telegram_request("sendMessage", {"chat_id": chat_id, "text": "✅ Log channel set!"})
-                    elif text == "/stats":
-                        logs = db_execute("SELECT COUNT(*) FROM logs", fetch=True)[0][0]
-                        users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0][0]
-                        telegram_request("sendMessage", {"chat_id": chat_id, "text": f"📊 Logs: {logs}\n👥 Users: {users}"})
+                if text and text.startswith("/"):
+                    if is_admin:
+                        if text == "/blacklist list":
+                            blist = get_blacklist()
+                            reply = "🚫 **Blacklist:**\n" + "\n".join([f"• `{u[0]}` ({u[1]})" for u in blist])
+                            telegram_request("sendMessage", {"chat_id": chat_id, "text": reply, "parse_mode": "Markdown"})
+                        elif text.startswith("/unblacklist"):
+                            try:
+                                target_id = int(text.split(" ")[1])
+                                remove_blacklist(target_id)
+                                telegram_request("sendMessage", {"chat_id": chat_id, "text": f"✅ Unblacklisted {target_id}"})
+                            except: pass
+                        elif text.startswith("/log set"):
+                            set_setting("log_channel", str(chat_id))
+                            telegram_request("sendMessage", {"chat_id": chat_id, "text": "✅ Log channel set successfully!"})
+                        elif text == "/stats":
+                            logs = db_execute("SELECT COUNT(*) FROM logs", fetch=True)[0][0]
+                            users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0][0]
+                            telegram_request("telegram_request("sendMessage", {"chat_id": chat_id, "text": f"📊 Logs: {logs}\n👥 Users: {users}"})
                     continue
 
                 # --- MODERATION (Groups Only) ---
@@ -264,19 +351,20 @@ def run_bot():
                         send_log(user_id, chat_id, text, "User Blacklisted", "Deleted")
                         continue
 
-                    score = calculate_score(text)
+                    # UPDATED: Use the new advanced scoring
+                    score, reasons = calculate_total_risk(user, text)
 
-                    # Score 8+ Delete + Ban
+                    # Score 8+ Delete + Ban (Strict)
                     if score >= 8:
                         telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
                         telegram_request("banChatMember", {"chat_id": chat_id, "user_id": user_id}) 
-                        add_blacklist(user_id, username, f"Severe Violation (Score {score})")
-                        send_log(user_id, chat_id, text, f"Severe (Score {score})", "Banned + Deleted")
+                        add_blacklist(user_id, username, f"Violation: {reasons} (Score {score})")
+                        send_log(user_id, chat_id, text, f"BANNED: {reasons}", "Deleted+Banned")
                     
                     # Score 5+ Delete Only
                     elif score >= 5:
                         telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
-                        send_log(user_id, chat_id, text, f"Moderate (Score {score})", "Deleted")
+                        send_log(user_id, chat_id, text, f"DELETED: {reasons}", "Deleted")
 
         except Exception as e:
             print(f"Polling Error: {e}")
@@ -293,7 +381,8 @@ def index():
         <p>🚫 Spam/Scam: <b>ACTIVE</b></p>
         <p>🔞 Adult/Bad Words: <b>BLOCKED</b></p>
         <p>💸 Paid Services: <b>BLOCKED</b></p>
-        <p>🧠 AI Detection: <b>RUNNING</b></p>
+        <p>🧠 Bio Link Filter: <b>ACTIVE</b></p>
+        <p>✨ Font Normalizer: <b>ACTIVE</b></p>
     </div>
     """
     return neon_html
