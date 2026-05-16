@@ -6,7 +6,7 @@ import requests
 import re
 from datetime import datetime
 from flask import Flask, jsonify
-from unidecode import unidecode  # <--- ADDED FOR FONT NORMALIZATION
+from unidecode import unidecode
 
 # ==========================================
 # ⚙️ CONFIGURATION & CONSTANTS
@@ -74,21 +74,14 @@ def set_setting(key, value):
 init_db()
 
 # ==========================================
-# 🧠 ADVANCED DETECTION ENGINE (NORMALIZED)
+# 🧠 ADVANCED DETECTION ENGINE
 # ==========================================
-
 def normalize_text(text):
-    """
-    𝗙𝗥𝗘𝗘 𝗦𝗛𝗢𝗪 -> free show
-    """
     if not text: return ""
-    # Convert unicode to ascii
     normalized = unidecode(text)
-    # Remove invisible chars
     normalized = re.sub(r'[\u200b-\u200d\u2060-\u206f\ufeff]', '', normalized)
     return normalized.lower()
 
-# Keywords for Bio Scan
 BIO_SUSPICIOUS_WORDS = [
     "join", "come", "dm", "msg", "service", "available", "show", 
     "paid", "vc", "video call", "inbox", "free show", "adult", 
@@ -131,10 +124,6 @@ def get_user_profile(user_id):
     return {}
 
 def calculate_total_risk(user_obj, message_text):
-    """
-    Combines Old Logic + New Bio/Font Logic
-    """
-    # --- 1. PROFILE & FONT CHECK ---
     username = user_obj.get("username", "")
     first_name = user_obj.get("first_name", "")
     last_name = user_obj.get("last_name", "")
@@ -145,66 +134,57 @@ def calculate_total_risk(user_obj, message_text):
     risk_score = 0
     risk_reasons = []
 
-    # Check Stylish Fonts in Name
+    # Font Check
     if len(full_raw_name) > len(norm_name) + 2:
         risk_score += 4
         risk_reasons.append("Stylish Font in Name")
 
-    # Fetch Bio
+    # Bio Scan
     profile = get_user_profile(user_obj["id"])
     bio_raw = profile.get("bio", "")
     norm_bio = normalize_text(bio_raw)
 
-    # --- 2. BIO SCAN ---
-    # A. Private Group Links in Bio (INSTANT BAN)
     if re.search(r't\.me/\+|t\.me/joinchat|private group', norm_bio):
         risk_score += 10
         risk_reasons.append("Private Group Link in Bio")
 
-    # B. Suspicious Words in Bio
     for word in BIO_SUSPICIOUS_WORDS:
         if word in norm_bio:
             risk_score += 6
             risk_reasons.append(f"Bio Word: {word}")
             break
 
-    # --- 3. MESSAGE SCAN (Using OLD Logic + Normalization) ---
+    # Message Scan
     norm_msg = normalize_text(message_text)
-    text_lower = norm_msg # Reuse variable for compatibility with old logic below
+    text_lower = norm_msg
 
-    # OLD: Scam / Money / Job Keywords (+5)
     for kw in SCAM_KEYWORDS:
         if kw in text_lower:
             risk_score += 5
             risk_reasons.append(f"Scam Word: {kw}")
             break 
 
-    # OLD: ADULT / BAD WORDS / PAID SERVICES (+8)
     for kw in BAD_CONTENT_KEYWORDS:
         if kw in text_lower:
             risk_score += 8
             risk_reasons.append(f"Bad Word: {kw}")
             break 
 
-    # NEW: Adult Bait Phrases (+7)
     for kw in ADULT_BAIT_KEYWORDS:
         if kw in text_lower:
             risk_score += 7
             risk_reasons.append(f"Adult Bait: {kw}")
             break
 
-    # OLD: Group Invite Link (+10)
     if re.search(r't\.me/\+|t\.me/joinchat', text_lower):
         risk_score += 10
         risk_reasons.append("Group Link in Msg")
 
-    # OLD: Emoji Spam / Distortion (+3)
     if len(re.findall(r'[^\w\s]', message_text)) > 10: 
         risk_score += 3
     if re.search(r'(.)\1{4,}', message_text): 
         risk_score += 3
         
-    # NEW: Font Spam in Message
     if len(message_text) > 0:
         non_ascii = sum(1 for c in message_text if ord(c) > 127)
         if non_ascii > len(message_text) * 0.5:
@@ -259,7 +239,7 @@ def run_bot():
             for update in data["result"]:
                 offset = update["update_id"] + 1
                 
-                # Handle Group Join (Auto-Ban Check + Bio Check)
+                # Handle Group Join
                 if "new_chat_members" in update.get("message", {}):
                     message = update["message"]
                     chat = message["chat"]
@@ -268,13 +248,11 @@ def run_bot():
                     user_id = user["id"]
                     username = user.get("username", "Unknown")
                     
-                    # 1. Check DB Blacklist
                     if is_blacklisted(user_id):
                         telegram_request("banChatMember", {"chat_id": chat_id, "user_id": user_id})
                         send_log(user_id, chat_id, "User Joined", "Auto-Banned (Blacklisted)", "Banned")
                         continue
                     
-                    # 2. UPDATED: Full Bio Scan on Join
                     score, reasons = calculate_total_risk(user, "")
                     
                     if score >= 10:
@@ -298,7 +276,7 @@ def run_bot():
                 chat_type = chat.get("type", "private")
                 is_admin = user_id in ADMIN_IDS
 
-                # --- DM COMMAND: /start ---
+                # --- DM COMMAND ---
                 if chat_type == "private" and text == "/start":
                     first_name = user.get("first_name", "Friend")
                     welcome_msg = (
@@ -310,7 +288,7 @@ def run_bot():
                         f"━━━━━━━━━━━━━━━\n"
                         f"✨ 𝗙𝗲𝗮𝘁𝘂𝗿𝗲𝘀:\n"
                         f"• 𝗦𝗰𝗮𝗺 & 𝗖𝗿𝘆𝗽𝘁𝗼 𝗙𝗶𝗹𝘁𝗲𝗿\n"
-                        f"• 𝗔𝗱𝘂𝗹𝗰𝘁 & 𝗕𝗮𝗱 𝗪𝗼𝗿𝗱 𝗙𝗶𝗹𝘁𝗲𝗿\n"
+                        f"• 𝗔𝗱𝘂𝗹𝘁 & 𝗕𝗮𝗱 𝗪𝗼𝗿𝗱 𝗙𝗶𝗹𝘁𝗲𝗿\n"
                         f"• 𝗣𝗮𝗶𝗱 𝗦𝗲𝗿𝘃𝗶𝗰𝗲 𝗕𝗹𝗼𝗰𝗸𝗲𝗿\n"
                         f"• 𝗝𝗼𝗯/𝗦𝗽𝗮𝗺 𝗗𝗲𝘁𝗲𝗰𝘁𝗼𝗿\n"
                         f"• 𝗕𝗶𝗼 𝗟𝗶𝗻𝗸 𝗙𝗶𝗹𝘁𝗲𝗿\n"
@@ -340,10 +318,11 @@ def run_bot():
                         elif text == "/stats":
                             logs = db_execute("SELECT COUNT(*) FROM logs", fetch=True)[0][0]
                             users = db_execute("SELECT COUNT(*) FROM users", fetch=True)[0][0]
-                            telegram_request("telegram_request("sendMessage", {"chat_id": chat_id, "text": f"📊 Logs: {logs}\n👥 Users: {users}"})
+                            # FIXED LINE BELOW (Removed duplicate telegram_request)
+                            telegram_request("sendMessage", {"chat_id": chat_id, "text": f"📊 Logs: {logs}\n👥 Users: {users}"})
                     continue
 
-                # --- MODERATION (Groups Only) ---
+                # --- MODERATION ---
                 if chat_type in ["group", "supergroup"]:
                     
                     if is_blacklisted(user_id):
@@ -351,17 +330,14 @@ def run_bot():
                         send_log(user_id, chat_id, text, "User Blacklisted", "Deleted")
                         continue
 
-                    # UPDATED: Use the new advanced scoring
                     score, reasons = calculate_total_risk(user, text)
 
-                    # Score 8+ Delete + Ban (Strict)
                     if score >= 8:
                         telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
                         telegram_request("banChatMember", {"chat_id": chat_id, "user_id": user_id}) 
                         add_blacklist(user_id, username, f"Violation: {reasons} (Score {score})")
                         send_log(user_id, chat_id, text, f"BANNED: {reasons}", "Deleted+Banned")
                     
-                    # Score 5+ Delete Only
                     elif score >= 5:
                         telegram_request("deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
                         send_log(user_id, chat_id, text, f"DELETED: {reasons}", "Deleted")
@@ -371,7 +347,7 @@ def run_bot():
             time.sleep(5)
 
 # ==========================================
-# 🌐 FLASK ENDPOINTS
+# 🌐 FLASK
 # ==========================================
 @app.route('/')
 def index():
